@@ -1,249 +1,260 @@
+"""
+Simulador de Sistema de Arquivos
+Desenvolvido para fins educacionais (Sistemas Operacionais).
+Suporta hierarquia de diretórios, operações básicas e alocação indexada.
+"""
+
 import os
 import sys
 
-class BlockManager:
-    def __init__(self, total_blocks=16, block_size=4096):
-        self.total_blocks = total_blocks
-        self.block_size = block_size  # em bytes (ex: 4KB = 4096)
-        # 0: Livre, 1: Ocupado/Reservado
-        self.blocks = [False] * total_blocks
-        self.block_info = [("LIVRE", "")] * total_blocks
 
-    def allocate_blocks(self, count, info_desc):
-        """Aloca blocos contíguos ou livres (exemplo simplificado: primeiros livres)"""
-        allocated = []
-        for i in range(self.total_blocks):
-            if not self.blocks[i]:
-                allocated.append(i)
-                if len(allocated) == count:
+class GerenciadorDeBlocos:
+    """Responsável por gerenciar o espaço físico do 'disco' dividido em blocos."""
+
+    def __init__(self, total_blocos=16, tamanho_bloco=4096):
+        self.total_blocos = total_blocos
+        self.tamanho_bloco = tamanho_bloco  # em bytes (ex: 4KB = 4096)
+        
+        # Estado dos blocos: False = Livre, True = Ocupado
+        self.blocos_ocupados = [False] * total_blocos
+        
+        # Metadados para sabermos o que está alocado em cada bloco
+        self.mapa_descricao = [("LIVRE", "")] * total_blocos
+
+    def alocar_blocos(self, quantidade, descricao):
+        """Procura blocos livres no disco e faz a alocação."""
+        blocos_alocados = []
+        for i in range(self.total_blocos):
+            if not self.blocos_ocupados[i]:
+                blocos_alocados.append(i)
+                if len(blocos_alocados) == quantidade:
                     break
         
-        if len(allocated) < count:
-            raise MemoryError("Espaço em disco insuficiente (Sem blocos livres suficientes).")
+        if len(blocos_alocados) < quantidade:
+            raise MemoryError("Espaço em disco insuficiente! Faltam blocos livres.")
         
-        for idx in allocated:
-            self.blocks[idx] = True
-            self.block_info[idx] = ("DADO", info_desc)
-        return allocated
+        for idx in blocos_alocados:
+            self.blocos_ocupados[idx] = True
+            self.mapa_descricao[idx] = ("DADO", descricao)
+            
+        return blocos_alocados
 
-    def free_blocks(self, block_list):
-        for idx in block_list:
-            if 0 <= idx < self.total_blocks:
-                self.blocks[idx] = False
-                self.block_info[idx] = ("LIVRE", "")
+    def liberar_blocos(self, lista_blocos):
+        """Libera os blocos que pertenciam a um arquivo ou diretório removido."""
+        for idx in lista_blocos:
+            if 0 <= idx < self.total_blocos:
+                self.blocos_ocupados[idx] = False
+                self.mapa_descricao[idx] = ("LIVRE", "")
 
-    def mark_reserved(self, idx, desc):
-        if 0 <= idx < self.total_blocks:
-            self.blocks[idx] = True
-            self.block_info[idx] = (desc, "")
+    def reservar_bloco(self, idx, tipo_desc):
+        """Reserva um bloco específico (usado para i-nodes)."""
+        if 0 <= idx < self.total_blocos:
+            self.blocos_ocupados[idx] = True
+            self.mapa_descricao[idx] = (tipo_desc, "")
 
-    def get_external_fragmentation(self):
-        """Calcula blocos livres dispersos (impossibilitam alocação contígua grande, se aplicável)"""
-        # Para alocação indexada pura, fragmentação externa por contiguidade é zero, 
-        # mas podemos medir blocos livres não adjacentes.
-        free_blocks = [i for i, used in enumerate(self.blocks) if not used]
-        if not free_blocks:
-            return 0
+
+class NoArquivo:
+    """Representa um nó na árvore de diretórios (pode ser arquivo ou pasta)."""
+
+    def __init__(self, nome, eh_diretorio=False, tamanho=0, pai=None):
+        self.nome = nome
+        self.eh_diretorio = eh_diretorio
+        self.tamanho = tamanho  # Tamanho real em bytes
+        self.pai = pai
+        self.filhos = {} if eh_diretorio else None
         
-        # Conta quantas ilhas de blocos livres existem
-        islands = 1
-        for i in range(1, len(free_blocks)):
-            if free_blocks[i] != free_blocks[i-1] + 1:
-                islands += 1
+        # Atributos específicos para a alocação indexada
+        self.bloco_inode = None
+        self.blocos_dados = []
+
+
+class SimuladorSistemaArquivos:
+    """Controla a lógica principal do sistema de arquivos e comandos."""
+
+    def __init__(self, total_blocos=16, tamanho_bloco=4096):
+        self.gerenciador_disco = GerenciadorDeBlocos(total_blocos, tamanho_bloco)
         
-        # Se há blocos livres mas fragmentados em ilhas menores que a maior necessidade
-        return len(free_blocks) * self.block_size if islands > 1 else 0
-
-
-class FileNode:
-    def __init__(self, name, is_dir=False, size=0, parent=None):
-        self.name = name
-        self.is_dir = is_dir
-        self.size = size  # em bytes
-        self.parent = parent
-        self.children = {} if is_dir else None
-        self.inode_block = None
-        self.data_blocks = []
-
-
-class FileSystemSimulator:
-    def __init__(self, total_blocks=16, block_size=4096):
-        self.bm = BlockManager(total_blocks, block_size)
-        self.root = FileNode("/", is_dir=True)
-        self.cwd = self.root
+        # Cria a raiz do sistema '/'
+        self.raiz = NoArquivo("/", eh_diretorio=True)
+        self.diretorio_atual = self.raiz
         
-        # Aloca Bloco 0 para o i-node raiz
-        self.bm.mark_reserved(0, "INODE_RAIZ")
-        self.root.inode_block = 0
+        # O Bloco 0 é reservado para o i-node do diretório raiz
+        self.gerenciador_disco.reservar_bloco(0, "INODE_RAIZ")
+        self.raiz.bloco_inode = 0
 
-    def resolve_path(self, path_str):
-        if path_str.startswith("/"):
-            current = self.root
-            parts = [p for p in path_str.split("/") if p]
+    def _resolver_caminho(self, caminho):
+        """Navega pela árvore a partir de um caminho absoluto ou relativo."""
+        if caminho.startswith("/"):
+            no_atual = self.raiz
+            partes = [p for p in caminho.split("/") if p]
         else:
-            current = self.cwd
-            parts = [p for p in path_str.split("/") if p and p != "."]
+            no_atual = self.diretorio_atual
+            partes = [p for p in caminho.split("/") if p and p != "."]
 
-        for part in parts:
-            if part == "..":
-                if current.parent:
-                    current = current.parent
-            elif part in current.children:
-                current = current.children[part]
+        for parte in partes:
+            if parte == "..":
+                if no_atual.pai:
+                    no_atual = no_atual.pai
+            elif no_atual.filhos and parte in no_atual.filhos:
+                no_atual = no_atual.filhos[parte]
             else:
-                return None, parts
-        return current, parts
+                return None, partes
+        return no_atual, partes
 
-    def mkdir(self, path_str):
-        parent_node, parts = self.resolve_path(path_str)
-        if not parts:
-            print(f"Erro: Caminho inválido ou já existe.")
+    def criar_diretorio(self, caminho):
+        """Comando mkdir: Cria um novo diretório."""
+        no_pai, partes = self._resolver_caminho(caminho)
+        if not partes:
+            print("⚠️ Caminho inválido ou já existente.")
             return
 
-        dir_name = parts[-1]
-        # Resolver o pai real
-        if len(parts) > 1:
-            parent_path = "/" + "/".join(parts[:-1]) if path_str.startswith("/") else "/".join(parts[:-1])
-            parent_node, _ = self.resolve_path(parent_path)
+        nome_novo_dir = partes[-1]
+        if len(partes) > 1:
+            caminho_pai = "/" + "/".join(partes[:-1]) if caminho.startswith("/") else "/".join(partes[:-1])
+            no_pai, _ = self._resolver_caminho(caminho_pai)
 
-        if parent_node and parent_node.is_dir:
-            if dir_name in parent_node.children:
-                print(f"Erro: Diretório '{dir_name}' já existe.")
+        if no_pai and no_pai.eh_diretorio:
+            if nome_novo_dir in no_pai.filhos:
+                print(f"⚠️ O diretório '{nome_novo_dir}' já existe.")
                 return
-            new_dir = FileNode(dir_name, is_dir=True, parent=parent_node)
-            parent_node.children[dir_name] = new_dir
-            print(f"Diretório criado: {path_str}")
+            
+            novo_dir = NoArquivo(nome_novo_dir, eh_diretorio=True, pai=no_pai)
+            no_pai.filhos[nome_novo_dir] = novo_dir
+            print(f"📁 Diretório criado com sucesso: {caminho}")
         else:
-            print(f"Erro: Caminho pai não encontrado.")
+            print("⚠️ Caminho pai não encontrado.")
 
-    def create_file(self, path_str, size_bytes):
-        parent_node, parts = self.resolve_path(path_str)
-        if not parts:
-            print(f"Erro: Caminho inválido.")
+    def criar_arquivo(self, caminho, tamanho_bytes):
+        """Comando create: Cria um arquivo e aloca seus blocos via i-node."""
+        no_pai, partes = self._resolver_caminho(caminho)
+        if not partes:
+            print("⚠️ Caminho inválido.")
             return
 
-        file_name = parts[-1]
-        if len(parts) > 1:
-            parent_path = "/" + "/".join(parts[:-1]) if path_str.startswith("/") else "/".join(parts[:-1])
-            parent_node, _ = self.resolve_path(parent_path)
+        nome_arquivo = partes[-1]
+        if len(partes) > 1:
+            caminho_pai = "/" + "/".join(partes[:-1]) if caminho.startswith("/") else "/".join(partes[:-1])
+            no_pai, _ = self._resolver_caminho(caminho_pai)
 
-        if parent_node and parent_node.is_dir:
-            if file_name in parent_node.children:
-                print(f"Erro: Arquivo '{file_name}' já existe.")
+        if no_pai and no_pai.eh_diretorio:
+            if nome_arquivo in no_pai.filhos:
+                print(f"⚠️ O arquivo '{nome_arquivo}' já existe.")
                 return
 
-            # Calcular blocos necessários
-            block_size = self.bm.block_size
-            num_blocks = (size_bytes + block_size - 1) // block_size
-            total_needed = 1 + num_blocks  # 1 para i-node do arquivo + blocos de dados
+            tamanho_bloco = self.gerenciador_disco.tamanho_bloco
+            # Calcula quantos blocos de dados serão necessários
+            qtd_blocos_dados = (tamanho_bytes + tamanho_bloco - 1) // tamanho_bloco
 
             try:
-                # Alocar i-node do arquivo (1 bloco)
-                inode_blocks = self.bm.allocate_blocks(1, f"INODE_{file_name.upper()}")
-                inode_idx = inode_blocks[0]
-
-                # Alocar blocos de dados
-                data_blocks = self.bm.allocate_blocks(num_blocks, f"'{path_str}'")
+                # Aloca 1 bloco para o i-node do arquivo
+                bloco_inode = self.gerenciador_disco.alocar_blocos(1, f"INODE_{nome_arquivo.upper()}")[0]
+                
+                # Aloca os blocos de dados necessários
+                blocos_dados = self.gerenciador_disco.alocar_blocos(qtd_blocos_dados, f"'{caminho}'")
             except MemoryError as e:
-                print(f"Erro de Alocação: {e}")
+                print(f"❌ Erro de alocação: {e}")
                 return
 
-            new_file = FileNode(file_name, is_dir=False, size=size_bytes, parent=parent_node)
-            new_file.inode_block = inode_idx
-            new_file.data_blocks = data_blocks
+            novo_arquivo = NoArquivo(nome_arquivo, eh_diretorio=False, tamanho=tamanho_bytes, pai=no_pai)
+            novo_arquivo.bloco_inode = bloco_inode
+            novo_arquivo.blocos_dados = blocos_dados
 
-            parent_node.children[file_name] = new_file
-            print(f"Arquivo criado: {path_str} ({size_bytes} bytes)")
+            no_pai.filhos[nome_arquivo] = novo_arquivo
+            print(f"📄 Arquivo criado: {caminho} ({tamanho_bytes} bytes)")
         else:
-            print(f"Erro: Diretório pai não encontrado.")
+            print("⚠️ Diretório pai não encontrado.")
 
-    def print_tree(self, node=None, prefix=""):
-        if node is None:
-            node = self.root
+    def exibir_arvore(self, no=None, prefixo=""):
+        """Exibe a árvore de diretórios de forma visual estilo terminal."""
+        if no is None:
+            no = self.raiz
         
-        print(f"{prefix}{node.name}{'/' if node.is_dir else ''} {'[DIR]' if node.is_dir else f'({node.size // 1024} KB) [ARQ]'}")
-        if node.is_dir and node.children:
-            items = list(node.children.items())
-            for i, (name, child) in enumerate(items):
-                connector = "└── " if i == len(items) - 1 else "├── "
-                extension = "    " if i == len(items) - 1 else "│   "
-                self._print_tree_recursive(child, prefix + connector, extension)
+        print(f"{prefix}{no.nome}{'/' if no.eh_diretorio else ''} {'[DIR]' if no.eh_diretorio else f'({no.tamanho} bytes) [ARQ]'}")
+        if no.eh_diretorio and no.filhos:
+            itens = list(no.filhos.items())
+            for i, (nome, filho) in enumerate(itens):
+                conector = "└── " if i == len(itens) - 1 else "├── "
+                proximo_prefixo = "    " if i == len(itens) - 1 else "│   "
+                self._exibir_arvore_recursivo(filho, prefixo + conector, prefixo + proximo_prefixo)
 
-    def _print_tree_recursive(self, node, prefix, current_prefix):
-        print(f"{prefix}{node.name}{'/' if node.is_dir else ''} {'[DIR]' if node.is_dir else f'({node.size} bytes) [ARQ]'}")
-        if node.is_dir and node.children:
-            items = list(node.children.items())
-            for i, (name, child) in enumerate(items):
-                connector = "└── " if i == len(items) - 1 else "├── "
-                extension = "    " if i == len(items) - 1 else "│   "
-                self._print_tree_recursive(child, current_prefix + connector, current_prefix + extension)
+    def _exibir_arvore_recursivo(self, no, prefixo, prefixo_atual):
+        print(f"{prefix}{no.nome}{'/' if no.eh_diretorio else ''} {'[DIR]' if no.eh_diretorio else f'({no.tamanho} bytes) [ARQ]'}")
+        if no.eh_diretorio and no.filhos:
+            itens = list(no.filhos.items())
+            for i, (nome, filho) in enumerate(itens):
+                conector = "└── " if i == len(itens) - 1 else "├── "
+                proximo_prefixo = "    " if i == len(itens) - 1 else "│   "
+                self._exibir_arvore_recursivo(filho, prefixo_atual + conector, prefixo_atual + proximo_prefixo)
 
-    def fs_status(self):
-        print(f"\nTamanho do Bloco de Disco: {self.bm.block_size // 1024} KB | Total de Blocos: {self.bm.total_blocks} ({self.bm.total_blocks * self.bm.block_size // 1024} KB)\n")
+    def status_disco(self):
+        """Comando fs_status: Mostra o mapa do disco e o relatório de fragmentação."""
+        gd = self.gerenciador_disco
+        print(f"\n⚙️  Tamanho do Bloco: {gd.tamanho_bloco // 1024} KB | Total de Blocos: {gd.total_blocos} ({gd.total_blocos * gd.tamanho_bloco // 1024} KB)\n")
         print("[MAPA DE ALOCAÇÃO DO DISCO (Indexado)]")
         
-        # Exibe blocos detalhados
         i = 0
-        while i < self.bm.total_blocks:
-            status, desc = self.bm.block_info[i]
+        while i < gd.total_blocos:
+            status, desc = gd.mapa_descricao[i]
             if status == "LIVRE":
-                start_free = i
-                while i < self.bm.total_blocks and self.bm.block_info[i][0] == "LIVRE":
+                inicio_livre = i
+                while i < gd.total_blocos and gd.mapa_descricao[i][0] == "LIVRE":
                     i += 1
-                end_free = i - 1
-                if start_free == end_free:
-                    print(f"Bloco {start_free:02d}                  : [LIVRE]")
+                fim_livre = i - 1
+                if inicio_livre == fim_livre:
+                    print(f"Bloco {inicio_livre:02d}                  : [LIVRE]")
                 else:
-                    print(f"Bloco {start_free:02d}..{end_free:02d}             : [LIVRE]")
+                    print(f"Bloco {inicio_livre:02d}..{fim_livre:02d}             : [LIVRE]")
             else:
                 print(f"Bloco {i:02d} [{status:<11}] : {desc}")
                 i += 1
 
-        # Coleta dados de arquivos para relatório
-        self._print_fragmentation_report(self.root)
+        self._gerar_relatorio_fragmentacao(self.raiz)
 
-    def _print_fragmentation_report(self, node):
-        # Percorre a árvore para achar arquivos e calcular fragmentação
-        files = []
-        def collect_files(n):
-            if not n.is_dir:
-                files.append(n)
+    def _gerar_relatorio_fragmentacao(self, no):
+        """Varre os arquivos recursivamente para calcular desperdícios e fragmentação."""
+        arquivos = []
+        def coletar(n):
+            if not n.eh_diretorio:
+                arquivos.append(n)
             else:
-                for child in n.children.values():
-                    collect_files(child)
-        collect_files(node)
+                for f in n.filhos.values():
+                    coletar(f)
+        coletar(no)
 
-        for f in files:
-            block_size = self.bm.block_size
-            num_allocated_blocks = len(f.data_blocks)
-            allocated_bytes = num_allocated_blocks * block_size
-            internal_frag = allocated_bytes - f.size
-            waste_pct = (internal_frag / allocated_bytes * 100) if allocated_bytes > 0 else 0
+        for arq in arquivos:
+            tamanho_bloco = self.gerenciador_disco.tamanho_bloco
+            blocos_alocados = len(arq.blocos_dados)
+            espaco_total_alocado = blocos_alocados * tamanho_bloco
+            fragmentacao_interna = espaco_total_alocado - arq.tamanho
             
-            print(f"\n--- RELATÓRIO DE FRAGMENTAÇÃO PARA: {f.name} ---")
-            print(f"Tamanho Real do Arquivo          : {f.size} bytes ({f.size // 1024} KB)")
-            print(f"Espaço Alocado no Disco          : {allocated_bytes} bytes ({num_allocated_blocks} blocos de {block_size // 1024} KB)")
-            print(f"Fragmentação Interna             : {internal_frag} bytes ({waste_pct:.0f}% de desperdício no último bloco)")
+            print(f"\n--- RELATÓRIO DE FRAGMENTAÇÃO ({arq.nome}) ---")
+            print(f"Tamanho Real do Arquivo          : {arq.tamanho} bytes ({arq.tamanho // 1024} KB)")
+            print(f"Espaço Alocado no Disco          : {espaco_total_alocado} bytes ({blocos_alocados} blocos de {tamanho_bloco // 1024} KB)")
+            print(f"Fragmentação Interna             : {fragmentacao_interna} bytes de desperdício no último bloco")
             print(f"Fragmentação Externa             : 0 bytes")
-            print(f"Necessidade de Compactação       : NÃO (Blocos alocados via i-node indexado)")
+            print(f"Necessidade de Compactação       : NÃO (Alocação indexada gerencia blocos por ponteiros/i-node)")
 
 
-# --- Demonstração Automatizada (Exemplos do Enunciado) ---
+# --- Execução Interativa se rodado diretamente ---
 if __name__ == "__main__":
-    fs = FileSystemSimulator(total_blocks=16, block_size=4096)
+    fs = SimuladorSistemaArquivos(total_blocos=16, tamanho_bloco=4096)
     
-    print("=== EXECUTANDO COMANDOS DE SIMULAÇÃO ===")
-    print("> mkdir /sistema")
-    fs.mkdir("/sistema")
+    print("=" * 60)
+    print("   DISCO VIRTUAL INICIADO (Simulador de Sistema de Arquivos)")
+    print("=" * 60)
     
-    print("> mkdir /sistema/logs")
-    fs.mkdir("/sistema/logs")
+    # Executando os exemplos padrão do enunciado automaticamente para facilitar
+    print("\n[Executando exemplos iniciais sugeridos...]")
+    fs.criar_diretorio("/sistema")
+    fs.criar_diretorio("/sistema/logs")
+    fs.criar_arquivo("/sistema/logs/app.log", 10240)  # 10 KB
     
-    print("> create /sistema/logs/app.log --size 10240")
-    fs.create_file("/sistema/logs/app.log", 10240) # 10 KB = 10240 bytes
+    print("\n" + "=" * 40)
+    print(" [ÁRVORE DO SISTEMA DE ARQUIVOS]")
+    print("=" * 40)
+    fs.exibir_arvore()
     
-    print("\n[ÁRVORE DO SISTEMA DE ARQUIVOS]")
-    fs.print_tree()
-    
-    print("\n> fs_status --details")
-    fs.fs_status()
+    print("\n" + "=" * 40)
+    print(" [STATUS DETALHADO DO DISCO]")
+    print("=" * 40)
+    fs.status_disco()
