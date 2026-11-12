@@ -1,333 +1,677 @@
+#!/usr/bin/env python3
 """
-Simulador de Sistema de Arquivos - Entrega 2 (Integrado, Dinâmico e Interativo)
-Requisitos: Integração de E/S, Escalonamento SSTF Dinâmico e RAID 5 com XOR Real.
+Simulador de Sistema de Arquivos - Entrega 2
+
+Acrescenta à primeira entrega:
+- Armazenamento distribuído em RAID 5 com quatro discos.
+- Distribuição de dados e paridade entre os discos.
+- Recuperação de dados após a falha de um disco.
+- Escalonamento de operações de leitura e escrita com SSTF.
+
+Mantenha este arquivo na mesma pasta de
+simulador_sistema_arquivos_entrega1.py.
 """
 
-import random
+from __future__ import annotations
 
-# =====================================================================
-# MÓDULO 1: GERENCIAMENTO FÍSICO DO DISCO & ALOCAÇÃO (Etapa 1)
-# =====================================================================
-class GerenciadorDeBlocos:
-    def __init__(self, total_blocos=32, tamanho_bloco=4096):
-        self.total_blocos = total_blocos
-        self.tamanho_bloco = tamanho_bloco  # 4 KB
-        self.blocos_ocupados = [False] * total_blocos
-        self.mapa_descricao = [("LIVRE", "")] * total_blocos
+from dataclasses import dataclass
+from typing import Optional
 
-    def alocar_blocos(self, quantidade, descricao):
-        blocos_alocados = []
-        for i in range(self.total_blocos):
-            if not self.blocos_ocupados[i]:
-                blocos_alocados.append(i)
-                if len(blocos_alocados) == quantidade:
-                    break
-        
-        if len(blocos_alocados) < quantidade:
-            raise MemoryError("Espaço em disco insuficiente.")
-        
-        for idx in blocos_alocados:
-            self.blocos_ocupados[idx] = True
-            self.mapa_descricao[idx] = ("DADO", descricao)
-        return blocos_alocados
-
-    def reservar_bloco(self, idx, tipo_desc):
-        if 0 <= idx < self.total_blocos:
-            self.blocos_ocupados[idx] = True
-            self.mapa_descricao[idx] = (tipo_desc, "")
+from simulador_sistema_arquivos_entrega1 import (
+    SistemaArquivos,
+    ErroSistemaArquivos,
+    TAMANHO_BLOCO,
+)
 
 
-# =====================================================================
-# MÓDULO 2: ESCALONAMENTO DO BRAÇO DE DISCO (Requisito 2 - SSTF)
-# =====================================================================
-class EscalonadorDisco:
-    """Calcula dinamicamente a fila de atendimento e o deslocamento da cabeça."""
-    def __init__(self, posicao_inicial=53):
-        self.cabeca_atual = posicao_inicial
-
-    def sstf(self, requisicoes_trilhas):
-        pendentes = list(requisicoes_trilhas)
-        atual = self.cabeca_atual
-        ordem_atendimento = [atual]
-        movimento_total = 0
-        formulas = []
-
-        while pendentes:
-            # Encontra a trilha mais próxima da posição atual (lógica SSTF real)
-            proxima = min(pendentes, key=lambda t: abs(t - atual))
-            distancia = abs(proxima - atual)
-            formulas.append(f"|{atual}-{proxima}|")
-            movimento_total += distancia
-            atual = proxima
-            ordem_atendimento.append(atual)
-            pendentes.remove(proxima)
-
-        self.cabeca_atual = atual
-        return ordem_atendimento, movimento_total, formulas
+QUANTIDADE_DISCOS = 4
 
 
-# =====================================================================
-# MÓDULO 3: REDUNDÂNCIA E TOLERÂNCIA A FALHAS VIA RAID 5 (Requisito 3)
-# =====================================================================
-class DiscoFisico:
-    def __init__(self, id_disco):
-        self.id_disco = id_disco
-        self.blocos = {}  # {bloco_idx: dados_em_bytes}
+@dataclass
+class RequisicaoIO:
+    disco: int
+    trilha: int
+    operacao: str
 
-    def escrever(self, bloco_idx, dados):
-        self.blocos[bloco_idx] = dados
 
-    def ler(self, bloco_idx):
-        return self.blocos.get(bloco_idx, None)
+class EscalonadorSSTF:
+    """Atende primeiro a requisição mais próxima da cabeça do disco."""
+
+    def __init__(self) -> None:
+        self.cabeca = 0
+        self.fila: list[RequisicaoIO] = []
+        self.historico: list[tuple[RequisicaoIO, int]] = []
+        self.movimento_total = 0
+
+    def adicionar(self, disco: int, trilha: int, operacao: str) -> None:
+        self.fila.append(
+            RequisicaoIO(
+                disco=disco,
+                trilha=trilha,
+                operacao=operacao
+            )
+        )
+
+    def executar_fila(self) -> list[tuple[RequisicaoIO, int]]:
+        atendidas = []
+
+        while self.fila:
+            indice = min(
+                range(len(self.fila)),
+                key=lambda i: abs(
+                    self.fila[i].trilha - self.cabeca
+                )
+            )
+
+            requisicao = self.fila.pop(indice)
+
+            movimento = abs(
+                requisicao.trilha - self.cabeca
+            )
+
+            self.movimento_total += movimento
+            self.cabeca = requisicao.trilha
+
+            registro = (requisicao, movimento)
+
+            self.historico.append(registro)
+            atendidas.append(registro)
+
+        return atendidas
+
+    def limpar_historico(self) -> None:
+        self.historico.clear()
+        self.movimento_total = 0
+
+    def relatorio(self) -> str:
+        linhas = [
+            "Estado do escalonador de disco",
+            "Algoritmo utilizado: SSTF (Shortest Seek Time First)",
+            f"Posição atual da cabeça: trilha {self.cabeca}",
+            f"Requisições concluídas: {len(self.historico)}",
+            f"Movimento total da cabeça: {self.movimento_total} trilhas",
+            f"Requisições aguardando: {len(self.fila)}",
+        ]
+
+        if self.historico:
+            linhas.append("")
+            linhas.append("Últimas operações:")
+
+            for requisicao, movimento in self.historico[-20:]:
+                linhas.append(
+                    f"Disco {requisicao.disco + 1} | "
+                    f"{requisicao.operacao} | "
+                    f"trilha {requisicao.trilha} | "
+                    f"movimento {movimento}"
+                )
+
+        return "\n".join(linhas)
 
 
 class ControladorRAID5:
-    """Implementa distribuição por striping e paridade XOR real com recuperação."""
-    def __init__(self, num_discos=3, tamanho_bloco=4096):
-        self.num_discos = num_discos
-        self.tamanho_bloco = tamanho_bloco
-        self.discos = [DiscoFisico(i+1) for i in range(num_discos)]
+    """
+    Controlador RAID 5 com quatro discos.
 
-    def _calcular_xor(self, lista_dados):
-        """Simula a operação lógica XOR entre os blocos de dados."""
-        # Se os dados forem bytes, fazemos o XOR byte a byte ou geramos um checksum de paridade real
-        xor_result = bytearray(self.tamanho_bloco)
-        for d in lista_dados:
-            # Preenche padding se o bloco for menor que o tamanho do bloco padrão
-            padded_d = d.ljust(self.tamanho_bloco, b'\x00')
-            for i in range(min(len(padded_d), len(xor_result))):
-                xor_result[i] ^= padded_d[i]
-        return bytes(xor_result)
+    Cada faixa possui três blocos de dados e um bloco de paridade.
+    A posição da paridade muda a cada faixa.
+    """
 
-    def gravar_raid5(self, nome_arquivo, dados_bytes):
-        # Divide os dados em pedaços do tamanho do bloco
-        partes = [dados_bytes[i:i+self.tamanho_bloco] for i in range(0, len(dados_bytes), self.tamanho_bloco)]
-        dados_por_linha = self.num_discos - 1
-        
-        print(f"\n[E/S - DISTRIBUIÇÃO EM DISCO - Arranjo RAID 5 ({self.num_discos} Discos Físicos, Blocos de {self.tamanho_bloco//1024} KB)]")
-        bloco_idx = 1
-        
-        for i in range(0, max(1, len(partes)), dados_por_linha):
-            grupo = partes[i:i+dados_por_linha]
-            # Garante que temos dados no grupo
-            if not grupo:
-                grupo = [b""]
-                
-            # Disco de paridade rotativo no RAID 5
-            disco_paridade_idx = (bloco_idx - 1) % self.num_discos
-            
-            # Calcula o XOR real com base nos dados do grupo
-            paridade_calculada = self._calcular_xor(grupo)
-            
-            d_idx = 0
-            for d in range(self.num_discos):
-                if d == disco_paridade_idx:
-                    self.discos[d].escrever(bloco_idx, paridade_calculada)
-                    print(f"Disco {d+1}: [PARIDADE : XOR calculado para o Bloco {bloco_idx:02d}]")
-                else:
-                    if d_idx < len(grupo):
-                        p = grupo[d_idx]
-                        self.discos[d].escrever(bloco_idx, p)
-                        print(f"Disco {d+1}: [Bloco {bloco_idx:02d}: {nome_arquivo} - Part {d_idx+1} ({len(p)} bytes)]")
-                        d_idx += 1
-            bloco_idx += 1
+    def __init__(
+        self,
+        quantidade_blocos_logicos: int,
+        escalonador: EscalonadorSSTF
+    ) -> None:
 
-    def simular_falha_e_recuperacao(self, disco_falhado_id=2, bloco_alvo=1):
-        print(f"\n[TESTE DE FALHA SIMULADO NO RAID 5]")
-        print(f"- Falha forçada no Disco {disco_falhado_id}!")
-        
-        disco_alvo_obj = self.discos[disco_falhado_id - 1]
-        dado_perdido = disco_alvo_obj.ler(bloco_alvo)
-        
-        if dado_perdido is None:
-            print(f"- Aviso: O Disco {disco_falhado_id} não possui o Bloco {bloco_alvo} alocado.")
-            return
+        self.quantidade_discos = QUANTIDADE_DISCOS
+        self.quantidade_blocos_logicos = quantidade_blocos_logicos
+        self.blocos_por_faixa = self.quantidade_discos - 1
 
-        # Isola temporariamente o disco falhado
-        disco_alvo_obj.blocos[bloco_alvo] = None
+        self.quantidade_faixas = (
+            quantidade_blocos_logicos + self.blocos_por_faixa - 1
+        ) // self.blocos_por_faixa
 
-        print(f"- Lendo discos remanescentes e bloco de paridade para o Bloco {bloco_alvo:02d}...")
-        
-        dados_sobreviventes = []
-        paridade_obtida = None
-        
-        for d in self.discos:
-            val = d.ler(bloco_alvo)
-            if d.id_disco == disco_falhado_id:
+        self.discos: list[dict[int, bytes]] = [
+            {} for _ in range(self.quantidade_discos)
+        ]
+
+        self.disco_com_falha: Optional[int] = None
+        self.escalonador = escalonador
+
+    def _zeros(self) -> bytes:
+        return bytes(TAMANHO_BLOCO)
+
+    def _disco_paridade(self, faixa: int) -> int:
+        return faixa % self.quantidade_discos
+
+    def _discos_dados(self, faixa: int) -> list[int]:
+        disco_paridade = self._disco_paridade(faixa)
+
+        return [
+            disco
+            for disco in range(self.quantidade_discos)
+            if disco != disco_paridade
+        ]
+
+    def _localizar_bloco(
+        self,
+        bloco_logico: int
+    ) -> tuple[int, int, int]:
+
+        if not 0 <= bloco_logico < self.quantidade_blocos_logicos:
+            raise ErroSistemaArquivos(
+                f"Bloco lógico inválido: {bloco_logico}"
+            )
+
+        faixa = bloco_logico // self.blocos_por_faixa
+        posicao = bloco_logico % self.blocos_por_faixa
+
+        disco_dados = self._discos_dados(faixa)[posicao]
+
+        return (
+            faixa,
+            disco_dados,
+            self._disco_paridade(faixa)
+        )
+
+    def _ler_bloco_fisico(
+        self,
+        disco: int,
+        faixa: int
+    ) -> bytes:
+
+        return self.discos[disco].get(
+            faixa,
+            self._zeros()
+        )
+
+    def _registrar_io(
+        self,
+        disco: int,
+        faixa: int,
+        operacao: str
+    ) -> None:
+
+        self.escalonador.adicionar(
+            disco,
+            faixa,
+            operacao
+        )
+
+    def _calcular_paridade(self, faixa: int) -> bytes:
+        resultado = bytearray(TAMANHO_BLOCO)
+
+        for disco in self._discos_dados(faixa):
+            conteudo = self._ler_bloco_fisico(
+                disco,
+                faixa
+            )
+
+            for indice, valor in enumerate(conteudo):
+                resultado[indice] ^= valor
+
+        return bytes(resultado)
+
+    def gravar_bloco(
+        self,
+        bloco_logico: int,
+        conteudo: bytes
+    ) -> None:
+
+        if self.disco_com_falha is not None:
+            raise ErroSistemaArquivos(
+                "Não é possível gravar enquanto houver um disco em falha. "
+                "Execute raid_rebuild primeiro."
+            )
+
+        faixa, disco_dados, disco_paridade = (
+            self._localizar_bloco(bloco_logico)
+        )
+
+        if len(conteudo) > TAMANHO_BLOCO:
+            raise ErroSistemaArquivos(
+                "O conteúdo ultrapassa o tamanho de um bloco."
+            )
+
+        bloco_preenchido = conteudo.ljust(
+            TAMANHO_BLOCO,
+            b"\0"
+        )
+
+        self.discos[disco_dados][faixa] = bloco_preenchido
+
+        self._registrar_io(
+            disco_dados,
+            faixa,
+            "escrita de dados"
+        )
+
+        paridade = self._calcular_paridade(faixa)
+
+        self.discos[disco_paridade][faixa] = paridade
+
+        self._registrar_io(
+            disco_paridade,
+            faixa,
+            "escrita de paridade"
+        )
+
+        self.escalonador.executar_fila()
+
+    def ler_bloco(self, bloco_logico: int) -> bytes:
+        faixa, disco_dados, disco_paridade = (
+            self._localizar_bloco(bloco_logico)
+        )
+
+        if (
+            self.disco_com_falha is None
+            or self.disco_com_falha != disco_dados
+        ):
+
+            self._registrar_io(
+                disco_dados,
+                faixa,
+                "leitura de dados"
+            )
+
+            self.escalonador.executar_fila()
+
+            return self._ler_bloco_fisico(
+                disco_dados,
+                faixa
+            )
+
+        resultado = bytearray(
+            self._ler_bloco_fisico(
+                disco_paridade,
+                faixa
+            )
+        )
+
+        self._registrar_io(
+            disco_paridade,
+            faixa,
+            "leitura para recuperação"
+        )
+
+        for disco in self._discos_dados(faixa):
+            if disco == disco_dados:
                 continue
-            if val is not None:
-                # Identifica se é paridade ou dado restante
-                # No RAID 5 rotativo, verificamos quem guarda o que dinamicamente
-                dados_sobreviventes.append(val)
 
-        # Reconstrução matemática via XOR reverso entre os sobreviventes e a paridade
-        print(f"- Executando reconstrução matemática via operação XOR em cima dos dados restantes...")
-        dado_reconstruido = self._calcular_xor(dados_sobreviventes)
-        
-        # Restaura o bloco no disco físico
-        disco_alvo_obj.blocos[bloco_alvo] = dado_reconstruido
-        print(f"- Recuperação do Bloco {bloco_alvo:02d} via operação XOR -> Reconstrução [OK] (Dado íntegro recuperado).")
+            if disco == self.disco_com_falha:
+                continue
 
+            conteudo = self._ler_bloco_fisico(
+                disco,
+                faixa
+            )
 
-# =====================================================================
-# MÓDULO 4: SISTEMA DE ARQUIVOS PRINCIPAL E INTEGRAÇÃO DE E/S
-# =====================================================================
-class NoArquivo:
-    def __init__(self, nome, eh_diretorio=False, tamanho=0, pai=None):
-        self.nome = nome
-        self.eh_diretorio = eh_diretorio
-        self.tamanho = tamanho
-        self.pai = pai
-        self.filhos = {} if eh_diretorio else None
-        self.bloco_inode = None
-        self.blocos_dados = []
+            self._registrar_io(
+                disco,
+                faixa,
+                "leitura para recuperação"
+            )
 
+            for indice, valor in enumerate(conteudo):
+                resultado[indice] ^= valor
 
-class SistemaDeArquivosIntegrado:
-    def __init__(self):
-        self.gerenciador_disco = GerenciadorDeBlocos(total_blocos=32, tamanho_bloco=4096)
-        self.raiz = NoArquivo("/", eh_diretorio=True)
-        self.diretorio_atual = self.raiz
-        
-        self.gerenciador_disco.reservar_bloco(0, "INODE_RAIZ")
-        self.raiz.bloco_inode = 0
-        
-        self.escalonador = EscalonadorDisco(posicao_inicial=53)
-        self.raid = ControladorRAID5(num_discos=3, tamanho_bloco=4096)
-        self.lista_arquivos = []
+        self.escalonador.executar_fila()
 
-    def mkdir(self, caminho):
-        partes = [p for p in caminho.split("/") if p]
-        if not partes:
-            return
-        nome = partes[-1]
-        self.raiz.filhos[nome] = NoArquivo(nome, eh_diretorio=True, pai=self.raiz)
-        print(f"📁 Diretório criado: {caminho}")
+        return bytes(resultado)
 
-    def write_file(self, caminho, tamanho_bytes, conteudo_str=""):
-        partes = [p for p in caminho.split("/") if p]
-        if not partes:
-            return
-        nome = partes[-1]
-        
-        tamanho_bloco = self.gerenciador_disco.tamanho_bloco
-        num_blocos = (tamanho_bytes + tamanho_bloco - 1) // tamanho_bloco
-        
-        try:
-            inode_idx = self.gerenciador_disco.alocar_blocos(1, f"INODE_{nome.upper()}")[0]
-            blocos_dados = self.gerenciador_disco.alocar_blocos(num_blocos, f"'{caminho}'")
-        except MemoryError as e:
-            print(f"❌ Erro: {e}")
-            return
+    def simular_falha(self, numero_disco: int) -> None:
+        if not 1 <= numero_disco <= self.quantidade_discos:
+            raise ErroSistemaArquivos(
+                f"Escolha um disco entre 1 e {self.quantidade_discos}."
+            )
 
-        novo_arq = NoArquivo(nome, eh_diretorio=False, tamanho=tamanho_bytes, pai=self.raiz)
-        novo_arq.bloco_inode = inode_idx
-        novo_arq.blocos_dados = blocos_dados
-        self.raiz.filhos[nome] = novo_arq
-        self.lista_arquivos.append(novo_arq)
+        if self.disco_com_falha is not None:
+            raise ErroSistemaArquivos(
+                "Já existe um disco em falha. "
+                "Recupere-o antes de simular outra falha."
+            )
 
-        print(f"\n> write_file {caminho} --size {tamanho_bytes}")
-        
-        # 1. Geração dinâmica de requisições de E/S baseadas nos blocos alocados
-        # (Gera trilhas aleatórias ou baseadas nos índices dos blocos para simulação real)
-        requisicoes_geradas = [b * 7 + 14 for b in blocos_dados] + [random.randint(10, 190) for _ in range(3)]
-        print(f"[E/S] Requisições de leitura/escrita pendentes nas trilhas: {requisicoes_geradas}")
-        print(f"Posição atual da cabeça de leitura: Trilha {self.escalonador.cabeca_atual}")
+        self.disco_com_falha = numero_disco - 1
 
-        # 2. Execução do Escalonador de Disco (SSTF)
-        ordem, movimento, formulas = self.escalonador.sstf(requisicoes_geradas)
-        print(f"\n--- ESCALONAMENTO DE DISCO: SSTF (Shortest Seek Time First) ---")
-        print(f"Ordem de Atendimento : {' -> '.join(map(str, ordem))}")
-        print(f"Deslocamento da Cabeça: {' + '.join(formulas)}")
-        print(f"Total de Movimento    : {' + '.join([f'{abs(ordem[i]-ordem[i+1])}' for i in range(len(ordem)-1))]} = {movimento} trilhas")
+    def reconstruir_disco(self) -> None:
+        if self.disco_com_falha is None:
+            raise ErroSistemaArquivos(
+                "Não existe disco em falha para reconstruir."
+            )
 
-        # 3. Gravação física distribuída sob arranjo RAID 5
-        if not conteudo_str:
-            conteudo_str = f"Conteúdo do arquivo {nome} gerado pelo sistema." * ((tamanho_bytes // 30) + 1)
-        
-        self.raid.gravar_raid5(caminho, conteudo_str.encode('utf-8')[:tamanho_bytes])
+        disco_perdido = self.disco_com_falha
 
-    def fs_status(self):
-        gd = self.gerenciador_disco
-        print(f"\nTamanho do Bloco de Disco: {gd.tamanho_bloco // 1024} KB | Total de Blocos: {gd.total_blocos} ({gd.total_blocos * gd.tamanho_bloco // 1024} KB)\n")
-        print("[MAPA DE ALOCAÇÃO DO DISCO (Indexado)]")
-        for i in range(gd.total_blocos):
-            status, desc = gd.mapa_descricao[i]
-            if status == "LIVRE":
-                print(f"Bloco {i:02d}                  : [LIVRE]")
+        for faixa in range(self.quantidade_faixas):
+            disco_paridade = self._disco_paridade(faixa)
+
+            if disco_perdido == disco_paridade:
+                for disco in self._discos_dados(faixa):
+                    self._registrar_io(
+                        disco,
+                        faixa,
+                        "leitura para reconstrução"
+                    )
+
+                conteudo_reconstruido = self._calcular_paridade(
+                    faixa
+                )
+
             else:
-                print(f"Bloco {i:02d} [{status:<11}] : {desc}")
+                resultado = bytearray(
+                    self._ler_bloco_fisico(
+                        disco_paridade,
+                        faixa
+                    )
+                )
 
-        print("\n--- RELATÓRIO DE FRAGMENTAÇÃO DINÂMICO ---")
-        if not self.lista_arquivos:
-            print("Nenhum arquivo gravado.")
-            return
+                self._registrar_io(
+                    disco_paridade,
+                    faixa,
+                    "leitura para reconstrução"
+                )
 
-        for arq in self.lista_arquivos:
-            espaco_alocado = len(arq.blocos_dados) * gd.tamanho_bloco
-            frag_interna = espaco_alocado - arq.tamanho
-            perc = (frag_interna / espaco_alocado * 100) if espaco_alocado > 0 else 0
-            print(f"Arquivo          : {arq.nome}")
-            print(f"Tamanho Real     : {arq.tamanho} bytes")
-            print(f"Espaço Alocado   : {espaco_alocado} bytes ({len(arq.blocos_dados)} blocos de {gd.tamanho_bloco//1024} KB)")
-            print(f"Frag. Interna    : {frag_interna} bytes ({perc:.1f}% de desperdício)")
-            print(f"Frag. Externa    : 0 bytes")
-            print(f"Compactação      : NÃO (Alocação Indexada)\n")
+                for disco in self._discos_dados(faixa):
+                    if disco == disco_perdido:
+                        continue
+
+                    conteudo = self._ler_bloco_fisico(
+                        disco,
+                        faixa
+                    )
+
+                    self._registrar_io(
+                        disco,
+                        faixa,
+                        "leitura para reconstrução"
+                    )
+
+                    for indice, valor in enumerate(conteudo):
+                        resultado[indice] ^= valor
+
+                conteudo_reconstruido = bytes(resultado)
+
+            self.discos[disco_perdido][faixa] = (
+                conteudo_reconstruido
+            )
+
+            self._registrar_io(
+                disco_perdido,
+                faixa,
+                "escrita de reconstrução"
+            )
+
+            self.escalonador.executar_fila()
+
+        self.disco_com_falha = None
+
+    def status(self) -> str:
+        linhas = [
+            "Estado do armazenamento RAID 5",
+            f"Quantidade de discos: {self.quantidade_discos}",
+            "Discos de dados por faixa: 3",
+            "Discos de paridade por faixa: 1",
+            f"Faixas disponíveis: {self.quantidade_faixas}",
+            f"Blocos lógicos disponíveis: {self.quantidade_blocos_logicos}",
+            "Distribuição da paridade: rotativa entre os discos",
+        ]
+
+        if self.disco_com_falha is None:
+            linhas.append(
+                "Estado: todos os discos estão funcionando."
+            )
+        else:
+            linhas.append(
+                f"Estado: disco {self.disco_com_falha + 1} em falha."
+            )
+
+            linhas.append(
+                "O sistema está em modo degradado e permite leituras."
+            )
+
+        linhas.append("")
+        linhas.append("Discos:")
+
+        for disco in range(self.quantidade_discos):
+            estado = (
+                "com falha"
+                if disco == self.disco_com_falha
+                else "operacional"
+            )
+
+            linhas.append(
+                f"Disco {disco + 1}: {estado}"
+            )
+
+        return "\n".join(linhas)
 
 
-# =====================================================================
-# CLI INTERATIVA PARA TESTES DO PROFESSOR
-# =====================================================================
-def main():
-    fs = SistemaDeArquivosIntegrado()
-    print("=" * 70)
-    print("   SIMULADOR DE SISTEMA DE ARQUIVOS - ENTREGA 2 (INTERATIVO)")
-    print("   Comandos disponíveis:")
-    print("     mkdir <caminho>")
-    print("     create <caminho> --size <bytes>")
-    print("     fs_status")
-    print("     raid_fail <disco_id> <bloco_idx>")
-    print("     exit")
-    print("=" * 70)
+class SistemaArquivosEntrega2(SistemaArquivos):
+    """Sistema de arquivos integrado ao RAID 5 e ao SSTF."""
 
-    # Caso de teste inicial automático baseado no modelo do professor
-    print("\n[Executando caso de teste inicial para demonstração...]")
-    fs.mkdir("/sistema")
-    fs.mkdir("/sistema/logs")
-    fs.write_file("/sistema/logs/app.log", 10240, "Novo Registro de Log do Sistema Operacional 2026")
+    def __init__(self, quantidade_blocos: int = 256):
+        super().__init__(quantidade_blocos)
+
+        self.escalonador = EscalonadorSSTF()
+
+        self.raid = ControladorRAID5(
+            quantidade_blocos,
+            self.escalonador
+        )
+
+    def _gravar_conteudo(
+        self,
+        arquivo,
+        conteudo: bytes
+    ) -> None:
+
+        super()._gravar_conteudo(
+            arquivo,
+            conteudo
+        )
+
+        if arquivo.bloco_indice is not None:
+            bloco_indice = self.blocos[
+                arquivo.bloco_indice
+            ]
+
+            self.raid.gravar_bloco(
+                bloco_indice.numero,
+                bloco_indice.conteudo
+            )
+
+        for numero in arquivo.blocos_dados:
+            bloco = self.blocos[numero]
+
+            self.raid.gravar_bloco(
+                numero,
+                bloco.conteudo
+            )
+
+    def _liberar_bloco(self, numero: int) -> None:
+        super()._liberar_bloco(numero)
+
+        if self.raid.disco_com_falha is None:
+            self.raid.gravar_bloco(
+                numero,
+                b""
+            )
+
+    def read_file(self, caminho: str) -> str:
+        pai, nome = self._separar_caminho(caminho)
+
+        if not nome or nome not in pai.arquivos:
+            raise ErroSistemaArquivos(
+                f"Arquivo não encontrado: {caminho}"
+            )
+
+        arquivo = pai.arquivos[nome]
+
+        partes = [
+            self.raid.ler_bloco(numero)[
+                :len(self.blocos[numero].conteudo)
+            ]
+            for numero in arquivo.blocos_dados
+        ]
+
+        return b"".join(partes).decode("utf-8")
+
+    def rm(self, caminho: str) -> None:
+        if self.raid.disco_com_falha is not None:
+            raise ErroSistemaArquivos(
+                "Não é possível remover arquivos durante uma falha RAID. "
+                "Execute raid_rebuild primeiro."
+            )
+
+        super().rm(caminho)
+
+    def fs_status(self, detalhes: bool = False) -> str:
+        relatorio = super().fs_status(detalhes)
+
+        return (
+            relatorio
+            + "\n\n"
+            + self.raid.status()
+            + "\n\n"
+            + self.escalonador.relatorio()
+        )
+
+
+AJUDA_ENTREGA2 = """
+Comandos adicionais da Entrega 2:
+
+  raid_status              Mostra o estado dos quatro discos RAID 5.
+  raid_fail NUMERO         Simula a falha de um disco (1 a 4).
+  raid_rebuild             Reconstrói o disco que apresentou falha.
+  io_status                Mostra o estado do escalonador SSTF.
+  io_history               Mostra as últimas operações de entrada e saída.
+  io_clear                 Limpa o histórico e o movimento acumulado.
+
+Os comandos da Entrega 1 continuam disponíveis.
+"""
+
+
+def executar_comando_entrega2(
+    sistema: SistemaArquivosEntrega2,
+    linha: str
+) -> bool:
+
+    try:
+        import shlex
+
+        argumentos = shlex.split(linha)
+
+        if not argumentos:
+            return True
+
+        comando = argumentos[0].lower()
+
+        if comando == "raid_status":
+            print(sistema.raid.status())
+
+        elif comando == "raid_fail":
+            if len(argumentos) != 2:
+                raise ErroSistemaArquivos(
+                    "Uso: raid_fail NUMERO (de 1 a 4)"
+                )
+
+            try:
+                numero = int(argumentos[1])
+
+            except ValueError as erro:
+                raise ErroSistemaArquivos(
+                    "Informe o número do disco."
+                ) from erro
+
+            sistema.raid.simular_falha(numero)
+
+            print(
+                f"Falha simulada no disco {numero}. "
+                "O RAID está operando em modo degradado."
+            )
+
+        elif comando == "raid_rebuild":
+            sistema.raid.reconstruir_disco()
+
+            print(
+                "Reconstrução concluída. "
+                "Todos os discos estão operacionais."
+            )
+
+        elif comando == "io_status":
+            print(sistema.escalonador.relatorio())
+
+        elif comando == "io_history":
+            if not sistema.escalonador.historico:
+                print(
+                    "Ainda não existem operações registradas."
+                )
+
+            else:
+                for requisicao, movimento in (
+                    sistema.escalonador.historico[-20:]
+                ):
+                    print(
+                        f"Disco {requisicao.disco + 1} | "
+                        f"{requisicao.operacao} | "
+                        f"trilha {requisicao.trilha} | "
+                        f"movimento {movimento}"
+                    )
+
+        elif comando == "io_clear":
+            sistema.escalonador.limpar_historico()
+
+            print(
+                "Histórico e movimento acumulado foram zerados."
+            )
+
+        elif comando == "help":
+            from simulador_sistema_arquivos_entrega1 import AJUDA
+
+            print(AJUDA)
+            print(AJUDA_ENTREGA2)
+
+        else:
+            from simulador_sistema_arquivos_entrega1 import (
+                executar_comando
+            )
+
+            return executar_comando(
+                sistema,
+                linha
+            )
+
+    except ErroSistemaArquivos as erro:
+        print(f"Erro: {erro}")
+
+    return True
+
+
+def iniciar() -> None:
+    sistema = SistemaArquivosEntrega2(
+        quantidade_blocos=256
+    )
+
+    print("Simulador de Sistema de Arquivos - Entrega 2")
+    print("Armazenamento: RAID 5 com quatro discos")
+    print("Escalonamento de disco: SSTF")
+    print("Digite 'help' para consultar os comandos.")
 
     while True:
         try:
-            entrada = input("\nsimulador> ").strip()
-            if not entrada:
-                continue
-            
-            partes = entrada.split()
-            cmd = partes[0]
+            linha = input(
+                f"{sistema.pwd()} $ "
+            )
 
-            if cmd == "exit":
-                print("Encerrando simulador...")
-                break
-            elif cmd == "mkdir" and len(partes) > 1:
-                fs.mkdir(partes[1])
-            elif cmd == "create" and len(partes) > 1:
-                caminho = partes[1]
-                tamanho = 8192
-                if "--size" in partes:
-                    idx = partes.index("--size")
-                    if idx + 1 < len(partes):
-                        tamanho = int(partes[idx + 1])
-                fs.write_file(caminho, tamanho)
-            elif cmd == "fs_status":
-                fs.fs_status5 = fs.fs_status()
-            elif cmd == "raid_fail":
-                d_id = int(partes[1]) if len(partes) > 1 else 2
-                b_idx = int(partes[2]) if len(partes) > 2 else 1
-                fs.raid.simular_falha_e_recuperacao(d_id, b_idx)
-            else:
-                print("Comando inválido. Use: mkdir, create, fs_status, raid_fail, exit")
-        except Exception as e:
-            print(f"Erro na execução: {e}")
+        except (EOFError, KeyboardInterrupt):
+            print("\nEncerrando o simulador.")
+            break
+
+        if not executar_comando_entrega2(
+            sistema,
+            linha
+        ):
+            print("Simulador encerrado.")
+            break
+
 
 if __name__ == "__main__":
-    main()
+    iniciar()
